@@ -1,0 +1,16 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+
+# Virtual environment directories
+venv/
+.env/
+
+# Build and distribution directories
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary files
+*.log
+
