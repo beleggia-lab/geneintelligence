@@ -9,13 +9,16 @@ import lz4.frame
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, BatchSampler, DataLoader
+from torch.utils.data import Dataset, BatchSampler, DataLoader, IterableDataset
+import collections
+import math
 import abc
 from anndata import AnnData
 from scipy.sparse import csr_matrix
 from scipy import stats
 from typing import Dict, Optional, List, Any, Iterator, Callable, Tuple, Union
 import multiprocessing as mp
+import itertools
 
 
 class GeneSorterBase(abc.ABC):
@@ -447,6 +450,111 @@ class AnndataGeneFinetuneDataset(AnnDataDataset):
         return token_ids_list, value_sequence.tolist()
 
 
+class LmdbCellInferenceDataset(IterableDataset):
+    """
+    An iterable dataset for sequential inference on an LMDB database.
+    """
+
+    def __init__(self,
+                 *,
+                 database_path: str,
+                 cell_token_ids: pd.DataFrame,
+                 dictionary: Dict[str, int],
+                 metadata_cols: list,
+                 batch_size: int,
+                 max_len: int,
+                 metadata_to_mask: list = None):
+        super().__init__()
+        self.database_path = database_path
+        self.cell_token_ids = cell_token_ids
+        self.batch_size = batch_size
+        self.max_len = max_len
+        self.metadata_to_mask = metadata_to_mask
+        self.dictionary = dictionary
+        self.metadata_cols = metadata_cols
+
+        self.mask_token_id = self.dictionary.get('<mask>')
+        self.indices_to_mask = []
+        if self.metadata_to_mask:
+            for col_to_mask in self.metadata_to_mask:
+                try:
+                    idx = self.metadata_cols.index(col_to_mask)
+                    self.indices_to_mask.append(idx)
+                except ValueError:
+                    print(
+                        f"Warning: Column '{col_to_mask}' not in metadata_cols, cannot mask.",
+                        flush=True)
+
+    def __iter__(self) -> Iterator[Tuple[List[List[int]], List[str]]]:
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            worker_id = 0
+            num_workers = 1
+            cell_ids_for_worker = self.cell_token_ids.index
+        else:
+            # Multi-process data loading
+            worker_id = worker_info.id
+            num_workers = worker_info.num_workers
+            # Assign a unique slice of cell IDs to this worker
+            cell_ids_for_worker = itertools.islice(self.cell_token_ids.index,
+                                                   worker_id, None,
+                                                   num_workers)
+
+        buckets_sequences = collections.defaultdict(list)
+        buckets_cell_ids = collections.defaultdict(list)
+        cell_token = self.dictionary.get('<cell>')
+
+        env = lmdb.open(self.database_path,
+                        readonly=True,
+                        lock=False,
+                        readahead=True,
+                        meminit=False)
+
+        with env.begin(write=False) as txn:
+            for cell_id in cell_ids_for_worker:
+                key_bytes = str(cell_id).encode('utf-8')
+                value_bytes = txn.get(key_bytes)
+
+                if value_bytes is None:
+                    print(
+                        f"Warning: Cell ID '{cell_id}' not found in LMDB for worker {worker_id}.",
+                        flush=True)
+                    continue
+
+                metadata_tokens = self.cell_token_ids.loc[
+                    cell_id, self.metadata_cols].tolist()
+                if self.indices_to_mask:
+                    for idx in self.indices_to_mask:
+                        metadata_tokens[idx] = self.mask_token_id
+
+                decompressed_bytes = lz4.frame.decompress(value_bytes)
+                gene_tokens = np.frombuffer(decompressed_bytes,
+                                            dtype=np.int16).tolist()
+                full_sequence = ([cell_token] + metadata_tokens +
+                                 gene_tokens)[:self.max_len]
+                seq_len = len(full_sequence)
+                if seq_len == 0: continue
+
+                bucket_id = math.ceil(math.log2(seq_len))
+                buckets_sequences[bucket_id].append(full_sequence)
+                buckets_cell_ids[bucket_id].append(cell_id)
+
+                if len(buckets_sequences[bucket_id]) == self.batch_size:
+                    yield (buckets_sequences.pop(bucket_id),
+                           buckets_cell_ids.pop(bucket_id))
+
+        # Process leftovers
+        for bucket_id in sorted(buckets_sequences.keys()):
+            if buckets_sequences[bucket_id]:
+                yield (buckets_sequences.pop(bucket_id),
+                       buckets_cell_ids.pop(bucket_id))
+
+        env.close()
+
+    def __len__(self):
+        return len(self.cell_token_ids)
+
+
 def ei_collate_batch(batch: List[List[int]], pad_token: int, mask_token: int,
                      mask_prob: float) -> Dict[str, torch.Tensor]:
     """
@@ -529,14 +637,14 @@ def ei_cell_finetune_collate_fn(
     }
 
 
-def ei_cell_inference_collate_fn(batch: List[List[int]],
-                                 pad_token: int) -> Dict[str, torch.Tensor]:
+def ei_cell_inference_collate_fn_with_ids(batch: Tuple[List[List[int]],
+                                                       List[str]],
+                                          pad_token: int) -> Dict[str, any]:
     """
-    Collate function for inference. It only handles token sequences 
-    and does not expect labels.
+    Collate function for inference that also handles cell IDs.
     """
-    # 'batch' is now just a list of token sequences, not (sequence, label) tuples.
-    token_seqs = batch
+
+    token_seqs, cell_ids = batch
 
     batch_size = len(token_seqs)
     # Pad to the next power of 2 for efficiency
@@ -558,4 +666,5 @@ def ei_cell_inference_collate_fn(batch: List[List[int]],
     return {
         'tokens': tokens_tensor,
         'inverted_padding': inverted_padding_tensor,
+        'cell_ids': cell_ids
     }

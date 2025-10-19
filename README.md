@@ -53,7 +53,50 @@ The framework follows the established pre-train/fine-tune paradigm:
 
 ---
 
-## 5. Future Direction
+## 5. Installation
+
+### a. Prerequisites
+
+* **Python 3.11+**
+* **CUDA-enabled GPU:** A CUDA-enabled GPU is required to run the fine-tuning and training scripts.
+* **PyTorch:** The project depends on `torch>=2.6.0`.
+
+### b. Installation Steps
+
+1.  **Clone the Repository**
+    ```bash
+    git clone [https://github.com/beleggia-lab/geneintelligence.git](https://github.com/beleggia-lab/geneintelligence.git)
+    cd geneintelligence
+    ```
+
+2.  **(Recommended) Set up a Virtual Environment**
+    It is highly recommended to use a virtual environment to manage dependencies. You can use your preferred tool, such as `conda` or `venv`.
+
+    * **Using `conda`:**
+        ```bash
+        # Create a new environment
+        conda create -n geneintelligence python=3.11 -y
+        # Activate the environment
+        conda activate geneintelligence
+        ```
+
+3.  **Install PyTorch**
+    Install the appropriate PyTorch version for your system and CUDA setup. Please visit the [**official PyTorch website**](https://pytorch.org/get-started/locally/) for updated instructions.
+
+4.  **Install geneintelligence**
+    With your virtual environment activated, install the package and its dependencies.
+    ```bash
+    pip install .
+    ```
+    
+5.  **(Optional) Run the Example Script**
+    To verify that the installation was successful, you can run the example script. It will automatically download a small dataset and a pre-trained model, then run a brief fine-tuning process to classify Natural Killer (NK) cells.
+    ```bash
+    python examples/test_NK_classification.py
+    ```
+---
+
+## 6. Future Direction
 
 Our immediate roadmap includes:
 * Submission of a pre-print manuscript for the **expression intelligence**.
@@ -63,6 +106,6 @@ Our immediate roadmap includes:
 
 ---
 
-## 6. Contact
+## 7. Contact
 
 filippo.beleggia@uk-koeln.de

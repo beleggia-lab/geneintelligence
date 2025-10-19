@@ -147,8 +147,8 @@ class EiFinetuneConfig(EiConfig):
     finetune_freeze_embeddings: bool = True
     finetune_freeze_blocks: int = 2
     finetune_keep_blocks: int = 2
-    finetune_new_blocks: int = 0
-    finetune_epochs: int = 10
+    finetune_new_blocks: int = 1
+    finetune_epochs: int = 5
     finetune_loss: str = None  #'CrossEntropyLoss'   or 'BCEWithLogitsLoss' or 'MSELoss'
     finetune_loss_kwargs: dict = field(default_factory=lambda: {})
     finetune_batch_size: int = 32
