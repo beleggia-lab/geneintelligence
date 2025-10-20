@@ -7,10 +7,9 @@ from geneintelligence.finetuners import EiTestClassificationFinetuner
 
 DOWNLOAD_DIR = "./example_data"
 REPO_URL = "https://github.com/beleggia-lab/geneintelligence/releases/download/v0.1.1a2"
-
 ASSET_ARCHIVE = {
-    "name": "nk_finetune_test_assets.zip",
-    "url": f"{REPO_URL}/nk_finetune_test_assets.zip"
+    "name": "nk_finetune_test_asset.zip",
+    "url": f"{REPO_URL}/nk_finetune_test_asset.zip"
 }
 EXPECTED_FILES = [
     "NK_test_annotated.h5ad", "Y8aJhX_step_1162919.pt", "Y8aJhX_config.yaml",
