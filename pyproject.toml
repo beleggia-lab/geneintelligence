@@ -9,6 +9,7 @@ authors = [
     { name = "Filippo Beleggia", email = "filippo.beleggia@uk-koeln.de" },
 ]
 description = "AI tools for the analysis of biological data"
+readme = "README.md" 
 license = "MIT"
 requires-python = ">=3.11"
 classifiers = [
@@ -26,4 +27,15 @@ dependencies = [
     "tqdm",
     "tables",
     "psutil",
+    "anndata",
+    "torchmetrics",
+    "pyyaml",
 ]
+
+[project.urls]
+"Homepage" = "https://github.com/beleggia-lab/geneintelligence"
+"Bug Tracker" = "https://github.com/beleggia-lab/geneintelligence/issues"
+
+# --- ADD THIS SECTION ---
+[tool.setuptools.packages.find]
+where = ["src"]
