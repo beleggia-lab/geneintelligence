@@ -6,7 +6,7 @@ import zipfile
 from geneintelligence.finetuners import EiTestClassificationFinetuner
 
 DOWNLOAD_DIR = "./example_data"
-REPO_URL = "https://github.com/beleggia-lab/geneintelligence/releases/download/v0.1.1a1"
+REPO_URL = "https://github.com/beleggia-lab/geneintelligence/releases/download/v0.1.1a2"
 
 ASSET_ARCHIVE = {
     "name": "nk_finetune_test_assets.zip",
