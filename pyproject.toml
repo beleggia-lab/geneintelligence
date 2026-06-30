@@ -1,41 +1,45 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools_scm[toml]>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "geneintelligence"
-version = "0.1.0"
+dynamic = ["version"]
 authors = [
     { name = "Filippo Beleggia", email = "filippo.beleggia@uk-koeln.de" },
 ]
-description = "AI tools for the analysis of biological data"
+description = "AI foundation models and tools for the analysis of biological data"
 readme = "README.md" 
-license = "MIT"
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
+keywords = ["bioinformatics", "single-cell", "rna-seq", "deep-learning", "transformer", "foundation-model"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
-    "torch>=2.6.0",
+    "torch>=2.7.1",
+    "flash-attn",
     "numpy",
     "pandas",
     "scipy",
     "lmdb",
     "lz4",
-    "tensorboard",
-    "tqdm",
-    "tables",
-    "psutil",
     "anndata",
     "torchmetrics",
-    "pyyaml",
+    "pyyaml", 
 ]
 
 [project.urls]
 "Homepage" = "https://github.com/beleggia-lab/geneintelligence"
 "Bug Tracker" = "https://github.com/beleggia-lab/geneintelligence/issues"
 
-# --- ADD THIS SECTION ---
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools_scm]

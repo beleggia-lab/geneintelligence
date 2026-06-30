@@ -1,76 +1,78 @@
-# gene intelligence
+# Gene Intelligence
 
-**Status:** Research Preview / Work in Progress - please get in touch before using
+![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Status: Research Preview](https://img.shields.io/badge/Status-Research_Preview-orange.svg)
 
-**Note:** This repository contains the core implementation for the **gene intelligence**, a planned suite of foundation models for the analysis of biological data. This code showcases the inaugural tool, the **expression intelligence**, and is currently under active development. A full manuscript and a stable, user-friendly version of this package are in preparation.
+**Status:** Research Preview
 
----
-
-## 1. Abstract
-
-Effectively learning from the scale and complexity of modern biologic datasets remains a fundamental challenge in biology. The **gene intelligence** aims to address this by developing a comprehensive suite of AI-powered tools that treat different modalities of biological data as a "language." By adapting powerful architectures from natural language processing, the **gene intelligence** will learn fundamental biological representations directly from raw data.
-
-This repository currently features the first tool in this suite: the **expression intelligence**, a deep learning framework for single-cell RNA sequencing (scRNA-seq). The **expression intelligence** converts the unordered set of expressed genes in a cell into a biologically meaningful sequence. This "gene sentence" is then used to pre-train a large Transformer model on a massive corpus of unlabeled single-cell data. The resulting pre-trained model serves as a **foundation model** that can be fine-tuned for a wide array of downstream tasks, including cell type classification, perturbation response prediction, and biomarker discovery.
+**Note:** This repository contains the implementation of Gene Intelligence, a transformer foundation model for single-cell RNA sequencing (scRNA-seq) data. The code is under active development, and a stable, user-friendly release is in preparation.
 
 ---
 
-## 2. The gene intelligenceo
+## 1. Overview
 
-The **gene intelligence** is envisioned as a collection of specialized tools, each designed to understand a different type of biological data, that will feed into a single multimodal network. The **expression intelligence** is the first of these. Future work will expand the suite to include models for other data types, creating a unified ecosystem for deep learning in the life sciences.
+Gene Intelligence is a transformer foundation model for single-cell RNA sequencing (scRNA-seq). Each cell is encoded as a token sequence — a `<cell>` token, a set of metadata tokens, and one token per expressed gene — and the model is pre-trained on a large corpus of unlabelled single-cell data with a masked-token objective. The pre-trained backbone can then be fine-tuned for downstream tasks, including cell-type classification, gene classification, and doublet detection, or used directly to extract cell-, gene-, and sample-level embeddings.
+
+In its count-embedding configuration, the model encodes expression by projecting log1p-transformed raw counts directly onto each gene-token embedding, using no library-size normalisation or positional encoding.
 
 ---
 
-## 3. Showcase: core concepts of the expression intelligence
+## 2. Core concepts
 
-The architectural and pre-training approach of the **expression intelligence** is heavily inspired by the pioneering work on **Geneformer** (Theis et al., *Nature*, 2023). Our implementation builds upon this foundation to create the first module of the broader, multimodal **gene intelligence**.
+The implementation rests on three components.
 
-The implementation of the **expression intelligence**, is built on three pillars:
+### a. Gene-token preprocessing
 
-### a. Gene sorting strategies
+A cell's transcriptome is an unordered set of (gene, count) pairs. The `src/geneintelligence/datasets.py` module turns this set into a token sequence and provides several ordering strategies, including random ordering and a range of count- and rank-based orderings (sorting by raw count, by transcripts-per-10k fold change, or by rank shift, with various tie-breaking rules). The count-embedding configuration used for Gene Intelligence orders genes randomly and encodes expression by projecting log1p-transformed raw counts onto each gene-token embedding, with no library-size normalisation.
 
-A cell's transcriptome is an unordered set of genes and their counts. To apply sequence-based models like Transformers, we must first impose a meaningful order. The `gene_intelligence/datasets.py` module implements several strategies to sort genes based on their expression counts and global statistics, effectively creating a "grammar" for the language of the cell.
+### b. Transformer backbone
 
-### b. The transformer backbone
-
-The core model, defined in `gene_intelligence/models.py`, is a custom-built Transformer encoder. It leverages modern, high-performance components:
-* **Flash Attention:** Utilizes `torch.nn.functional.scaled_dot_product_attention` for memory-efficient and fast attention calculations.
-* **SwiGLU Activation:** Employs the SwiGLU variant of the GELU activation function in the feed-forward network for improved performance.
-* **Flexible Configuration:** All model hyperparameters are managed via a unified `EiConfig` dataclass in `gene_intelligence/configs.py`.
+The core model, defined in `src/geneintelligence/models.py`, is a pre-norm Transformer encoder with:
+* **FlashAttention** over variable-length packed (unpadded) sequences, via the `flash_attn` library's `flash_attn_varlen_func` kernel.
+* **SwiGLU** feed-forward layers.
+* **Weight-tied** input and output embeddings.
+* **Configurable** hyperparameters, managed through the `GiConfig` dataclass in `src/geneintelligence/configs.py`.
 
 ### c. Pre-training and fine-tuning
 
-The framework follows the established pre-train/fine-tune paradigm:
-1.  **Pre-training (Self-Supervised):** The model learns to predict randomly masked genes in a cell's gene sequence, forcing it to understand the context and relationships between genes.
-2.  **Fine-tuning (Supervised):** The pre-trained backbone is adapted for specific downstream tasks, such as cell type identification and gene function prediction.
+The framework follows the standard pre-train / fine-tune paradigm:
+1.  **Pre-training (self-supervised):** the model predicts randomly masked gene tokens. In the count-embedding configuration, an independent subset of counts is also masked and predicted by a parallel regression head, with the two objectives combined using learned multi-task uncertainty weighting.
+2.  **Fine-tuning (supervised):** the pre-trained backbone is adapted for specific downstream tasks through cell-level and gene-level classification and regression heads.
 
 ---
 
-## 4. Repository structure
+## 3. Repository structure
 
-* `gene_intelligence/configs.py`: Contains `dataclass` configurations for managing all model and training hyperparameters for the **expression intelligence**.
-* `gene_intelligence/datasets.py`: Includes data loaders, preprocessing logic, and the gene sorting algorithms for the **expression intelligence**. Supports both in-memory `AnnData` objects and memory-mapped `LMDB` databases for scalability.
-* `gene_intelligence/models.py`: Defines the core `ExpressionIntelligence` Transformer model and its fine-tuning heads.
+The package source lives under `src/geneintelligence/`:
+
+* `configs.py`: dataclass configurations (`GiConfig`, `GiFinetuneConfig`) for managing model and training hyperparameters.
+* `datasets.py`: data loaders, preprocessing logic, and the gene-ordering strategies. Supports both in-memory `AnnData` objects and memory-mapped `LMDB` databases for scalability.
+* `models.py`: the core `GeneIntelligence` Transformer backbone, including the embeddings, attention blocks, and the masked-gene and count prediction heads.
+* `finetuners.py`: fine-tuning heads built on top of the backbone for cell-level and gene-level classification and regression tasks.
+* `api.py`: a high-level `GeneIntelligenceModel` interface for inference and for extracting cell-, gene-, and sample-level embeddings.
+* `embeddings.py`: utilities for pooling and concatenating embeddings into cell- and sample-level `AnnData` objects.
 
 ---
 
-## 5. Installation
+## 4. Installation
 
 ### a. Prerequisites
 
 * **Python 3.11+**
-* **CUDA-enabled GPU:** A CUDA-enabled GPU is required to run the fine-tuning and training scripts.
-* **PyTorch:** The project depends on `torch>=2.6.0`.
+* **CUDA-enabled GPU:** required to run the training and fine-tuning scripts. `flash-attn` is a hard dependency, so the package cannot be imported on a CPU-only system.
+* **PyTorch:** the project depends on `torch>=2.7`.
 
-### b. Installation Steps
+### b. Installation steps
 
-1.  **Clone the Repository**
+1.  **Clone the repository**
     ```bash
-    git clone [https://github.com/beleggia-lab/geneintelligence.git](https://github.com/beleggia-lab/geneintelligence.git)
+    git clone https://github.com/beleggia-lab/geneintelligence.git
     cd geneintelligence
     ```
 
-2.  **(Recommended) Set up a Virtual Environment**
-    It is highly recommended to use a virtual environment to manage dependencies. You can use your preferred tool, such as `conda` or `venv`.
+2.  **(Recommended) Set up a virtual environment**
+    Using a virtual environment to manage dependencies is recommended. You can use your preferred tool, such as `conda` or `venv`.
 
     * **Using `conda`:**
         ```bash
@@ -81,31 +83,33 @@ The framework follows the established pre-train/fine-tune paradigm:
         ```
 
 3.  **Install PyTorch**
-    Install the appropriate PyTorch version for your system and CUDA setup. Please visit the [**official PyTorch website**](https://pytorch.org/get-started/locally/) for updated instructions.
+    Install the appropriate PyTorch version for your system and CUDA setup. See the [official PyTorch website](https://pytorch.org/get-started/locally/) for current instructions.
 
-4.  **Install geneintelligence**
-    With your virtual environment activated, install the package and its dependencies.
+4.  **Install FlashAttention**
+    `flash-attn` builds against your already-installed PyTorch, so it must be installed *after* PyTorch and with build isolation disabled. Installing it explicitly here means the final step will not try to rebuild it.
+    ```bash
+    pip install packaging ninja
+    pip install flash-attn --no-build-isolation
+    ```
+    > **Note:** Building `flash-attn` from source can take several minutes and requires a matching CUDA toolchain. Installing `ninja` first speeds up the build.
+
+5.  **Install Gene Intelligence**
+    With the virtual environment activated, install the package and its remaining dependencies.
     ```bash
     pip install .
     ```
-    
-5.  **(Optional) Run the Example Script**
-    To verify that the installation was successful, you can run the example script. It will automatically download a small dataset and a pre-trained model, then run a brief fine-tuning process to classify Natural Killer (NK) cells.
-    ```bash
-    python examples/test_NK_classification.py
-    ```
----
-
-## 6. Future Direction
-
-Our immediate roadmap includes:
-* Submission of a pre-print manuscript for the **expression intelligence**.
-* Release of pre-trained model weights on a large corpus of data from the **[CELLxGENE](https://cellxgene.cziscience.com/)** census, a major public atlas of single-cell data.
-* Development of the next **gene intelligence** tools.
-* Refinement of the API for easier use by the research community.
 
 ---
 
-## 7. Contact
+## 5. Roadmap
+
+Planned work includes:
+* Release of pre-trained checkpoints and configuration files.
+* A packaged doublet-detection workflow (the `detect_doublets` API is currently under development).
+* Continued refinement of the high-level API.
+
+---
+
+## 6. Contact
 
 filippo.beleggia@uk-koeln.de

@@ -1,16 +1,55 @@
-# Byte-compiled files
+# Byte-compiled / optimized / C extensions
 __pycache__/
 *.py[cod]
+*.so
 
-# Virtual environment directories
-venv/
-.env/
-
-# Build and distribution directories
+# Distribution / packaging
 build/
 dist/
 *.egg-info/
+.eggs/
 
-# Logs and temporary files
+# setuptools_scm generated version file
+_version.py
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.env/
+.env
+
+# Editors / IDEs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
 *.log
 
+# Notebooks
+.ipynb_checkpoints/
+
+# Testing / linting / type-checking caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Model checkpoints / weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Data and on-disk caches (regenerable)
+example_data/
+*.h5ad
+*.npy
+*.npy.tmp
+*.mdb
