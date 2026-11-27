@@ -24,7 +24,6 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.7.1",
-    "flash-attn",
     "numpy",
     "pandas",
     "scipy",
@@ -34,6 +33,9 @@ dependencies = [
     "torchmetrics",
     "pyyaml", 
 ]
+
+[project.optional-dependencies]
+cuda = ["flash-attn"]
 
 [project.urls]
 "Homepage" = "https://github.com/beleggia-lab/geneintelligence"

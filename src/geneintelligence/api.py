@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 
 # Local Application Imports
 from geneintelligence.configs import GiConfig
-from geneintelligence.datasets import AnnDataDataset, gi_collate, get_sorter
+from geneintelligence.datasets import AnnDataDataset, gi_collate, get_sorter, initialize_worker
 from geneintelligence.embeddings import (
     concatenate_embedding_adata,
     pivot_obs_column_to_adata,
@@ -84,10 +84,15 @@ class GeneIntelligenceModel:
         return config, backbone
 
     @torch.no_grad()
-    def embed_cells(self,
-                    adata: AnnData,
-                    batch_size: int = 32,
-                    num_workers: int = 0) -> AnnData:
+    def embed_cells(
+        self,
+        adata: AnnData,
+        batch_size: int = 32,
+        num_workers: int = 0,
+        cell_representation=True,
+        gene_mean_representation=True,
+        metadata_representation=True,
+    ) -> AnnData:
         """
         Extracts cell-level representations.
         Returns a new AnnData object with embeddings in .X and original metadata in .obs.
@@ -118,7 +123,8 @@ class GeneIntelligenceModel:
         dataloader = DataLoader(dataset,
                                 batch_size=batch_size,
                                 collate_fn=api_collate,
-                                num_workers=num_workers)
+                                num_workers=num_workers,
+                                worker_init_fn=initialize_worker)
 
         backbone = self.model
         metadata_len = len(self.config.metadata_cols)
@@ -172,7 +178,14 @@ class GeneIntelligenceModel:
                 gene_repr = hidden.new_zeros((B, D))
 
             # Concatenate: cls_metadata_gene_mean_concat
-            batch_emb = torch.cat([cls_repr, meta_repr, gene_repr], dim=1)
+            to_concatenate = []
+            if cell_representation:
+                to_concatenate.append(cls_repr)
+            if metadata_representation:
+                to_concatenate.append(meta_repr)
+            if gene_mean_representation:
+                to_concatenate.append(gene_repr)
+            batch_emb = torch.cat(to_concatenate, dim=1)
             all_embeddings.append(batch_emb.cpu().numpy())
 
         # Construct new AnnData
@@ -216,7 +229,8 @@ class GeneIntelligenceModel:
         dataloader = DataLoader(dataset,
                                 batch_size=batch_size,
                                 collate_fn=api_collate,
-                                num_workers=num_workers)
+                                num_workers=num_workers,
+                                worker_init_fn=initialize_worker)
 
         backbone = self.model
         token_to_gene = {v: k for k, v in self.token_dictionary.items()}

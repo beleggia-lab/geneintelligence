@@ -1,4 +1,5 @@
-from .configs import EiConfig
-from .models import ExpressionIntelligence
+from .api import GeneIntelligenceModel
+from .configs import GiConfig
+from .models import GeneIntelligence
 
-__all__ = ['EiConfig', 'ExpressionIntelligence']
+__all__ = ['GiConfig', 'GeneIntelligence', 'GeneIntelligenceModel']

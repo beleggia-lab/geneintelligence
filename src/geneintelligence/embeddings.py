@@ -22,7 +22,7 @@ def pool_embedding_adata(adata: ad.AnnData,
     """
     Collapses cell embeddings vertically by taking the mean across specified groups.
     """
-    group_label = "_".join(group_by_columns)
+    group_label = "_|_".join(group_by_columns)
     grouped_metadata = adata.obs.groupby(group_by_columns, observed=True)
 
     # Calculate homogeneity and keep grouping columns as regular columns

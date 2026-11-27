@@ -3,7 +3,6 @@
 Script Name: models.py
 Description: Core Transformer architectures, embeddings, and loss functions
              for the Gene Intelligence backbone.
-
 Usage:
     Imported as a module. Not intended for direct execution.
 """
@@ -17,7 +16,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from flash_attn import flash_attn_varlen_func
 from torch.profiler import record_function
 
 # Local Application Imports
@@ -155,8 +153,26 @@ class GiEmbeddings(nn.Module):
         return x
 
 
+def _cpu_packed_self_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                               cu_seqlens: torch.Tensor) -> torch.Tensor:
+    """Run noncausal attention independently on each packed cell."""
+    bounds = cu_seqlens.tolist()
+    out = torch.empty_like(q)
+    for start, end in zip(bounds, bounds[1:]):
+        keys = k[start:end].transpose(0, 1).unsqueeze(0)
+        values = v[start:end].transpose(0, 1).unsqueeze(0)
+        # Tile only the queries. Every query sees the cell's full key sequence.
+        for first in range(start, end, 256):
+            last = min(first + 256, end)
+            queries = q[first:last].transpose(0, 1).unsqueeze(0)
+            result = F.scaled_dot_product_attention(
+                queries, keys, values, dropout_p=0.0, is_causal=False)
+            out[first:last] = result.squeeze(0).transpose(0, 1)
+    return out
+
+
 class GiFlashSelfAttention(nn.Module):
-    """Multi-head self-attention over packed, variable-length sequences via FlashAttention."""
+    """Multi-head self-attention over packed, variable-length cell sequences."""
 
     def __init__(self,
                  d_model: int,
@@ -178,15 +194,26 @@ class GiFlashSelfAttention(nn.Module):
         qkv = qkv.reshape(total_tokens, 3, self.num_heads, self.head_dim)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
 
-        out = flash_attn_varlen_func(q,
-                                     k,
-                                     v,
-                                     cu_seqlens_q=cu_seqlens,
-                                     cu_seqlens_k=cu_seqlens,
-                                     max_seqlen_q=max_seqlen,
-                                     max_seqlen_k=max_seqlen,
-                                     dropout_p=0.0,
-                                     causal=False)
+        if q.device.type == 'cpu':
+            out = _cpu_packed_self_attention(q, k, v, cu_seqlens)
+        elif q.is_cuda:
+            try:
+                from flash_attn import flash_attn_varlen_func
+            except ImportError as exc:
+                raise ImportError(
+                    "CUDA attention requires flash-attn. See the CUDA installation steps in the README."
+                ) from exc
+            out = flash_attn_varlen_func(q,
+                                         k,
+                                         v,
+                                         cu_seqlens_q=cu_seqlens,
+                                         cu_seqlens_k=cu_seqlens,
+                                         max_seqlen_q=max_seqlen,
+                                         max_seqlen_k=max_seqlen,
+                                         dropout_p=0.0,
+                                         causal=False)
+        else:
+            raise NotImplementedError(f"Unsupported attention device: {q.device.type}")
         out = self.out_proj(out.reshape(total_tokens, -1))
         return self.dropout(out)
 
@@ -249,7 +276,6 @@ class GiTransformerBlock(nn.Module):
 
 class GeneIntelligence(nn.Module):
     """Transformer backbone for masked modeling of gene-expression token sequences.
-
     Embeds ``<cell>`` + metadata + gene tokens, runs them through stacked
     Transformer blocks, and predicts masked gene tokens (and optionally masked
     counts) via tied prediction heads.
@@ -291,12 +317,22 @@ class GeneIntelligence(nn.Module):
             nn.Dropout(config.backbone_dropout),
             nn.Linear(config.backbone_d_model, config.vocab_size))
 
+        self.count_loss = getattr(config, 'pretrain_count_loss', None)
+        if self.count_loss is None:
+            self.count_loss = 'smooth_l1'
+
+        if self.count_loss not in ('smooth_l1', 'ztnb'):
+            raise ValueError(
+                f"Unknown pretrain_count_loss: {self.count_loss!r}. "
+                "Expected None, 'smooth_l1', or 'ztnb'.")
+
         if getattr(config, 'pretrain_mask_counts_prob', 0.0) > 0.0:
+            count_out_dim = 2 if self.count_loss == 'ztnb' else 1
             self.count_prediction_head = nn.Sequential(
                 nn.Linear(config.backbone_d_model, config.backbone_d_model),
                 nn.GELU(), nn.LayerNorm(config.backbone_d_model),
                 nn.Dropout(config.backbone_dropout),
-                nn.Linear(config.backbone_d_model, 1))
+                nn.Linear(config.backbone_d_model, count_out_dim))
 
         # --- Dynamic Loss Balancing Initialization ---
         if getattr(config, 'pretrain_dynamic_loss_weighting', False):
@@ -307,6 +343,10 @@ class GeneIntelligence(nn.Module):
         self.apply(self._init_weights)
         # tying the weights of the embedding and prediction head
         self.prediction_head[-1].weight = self.token_emb.weight
+        if hasattr(self,
+                   'count_prediction_head') and self.count_loss == 'ztnb':
+            with torch.no_grad():
+                self.count_prediction_head[-1].bias[1].fill_(4.0)
         if gene_metadata is not None:
             self._initialize_prediction_biases(config, gene_metadata, device)
 
@@ -354,41 +394,56 @@ class GeneIntelligence(nn.Module):
                                       gene_metadata: pd.DataFrame,
                                       device: torch.device) -> None:
 
+        init_gene = getattr(config, 'pretrain_initialize_gene_biases',
+                            None) is True
+        init_count = getattr(config, 'pretrain_initialize_count_biases',
+                             None) is True
+        if not (init_gene or init_count):
+            return
+
+        # Needed by both blocks: total non-zero entries in the dataset.
         nnz = torch.tensor(gene_metadata['nnz'].values,
                            dtype=torch.float32,
                            device=device)
-        gene_token_ids = torch.tensor(gene_metadata['token_id'].values,
-                                      dtype=torch.long,
-                                      device=device)
-        bias_vector = torch.full((config.vocab_size, ),
-                                 -1e4,
-                                 dtype=torch.float32,
-                                 device=device)
-
-        # Log-Frequency for standard MLM (Softmax/CrossEntropy)
         total_gene_tokens = nnz.sum()
-        f = torch.clamp(nnz / total_gene_tokens, min=1e-9)
-        target_biases = torch.log(f)
 
-        bias_vector[gene_token_ids] = target_biases
+        if init_gene:
+            gene_token_ids = torch.tensor(gene_metadata['token_id'].values,
+                                          dtype=torch.long,
+                                          device=device)
 
-        with torch.no_grad():
-            self.prediction_head[-1].bias.copy_(bias_vector)
+            # Log-Frequency for standard MLM (Softmax/CrossEntropy). Tokens not
+            # in gene_metadata (<mask>, <pad>, <cell>, metadata vocabulary) keep
+            # the -1e4 suppression.
+            f = torch.clamp(nnz / total_gene_tokens, min=1e-9)
+            target_biases = torch.log(f)
+            bias_vector = torch.full((config.vocab_size, ),
+                                     -1e4,
+                                     dtype=torch.float32,
+                                     device=device)
+            bias_vector[gene_token_ids] = target_biases
 
-        if hasattr(self, 'count_prediction_head'):
+            with torch.no_grad():
+                self.prediction_head[-1].bias.copy_(bias_vector)
+
+        if init_count and hasattr(self, 'count_prediction_head'):
             total_counts = torch.tensor(gene_metadata['countsum'].values,
                                         dtype=torch.float32,
                                         device=device).sum()
 
-            # total_gene_tokens is the sum of nnz (total non-zero entries in the dataset)
             avg_raw_count = total_counts / total_gene_tokens
-            empirical_mean_log1p_count = torch.log1p(avg_raw_count).item()
 
             with torch.no_grad():
-                # Set the final linear layer's bias to the empirical mean and the weights to 0
-                self.count_prediction_head[-1].bias.fill_(
-                    empirical_mean_log1p_count)
+                # Start as a pure constant predictor at the corpus-average rate.
+                # For 'ztnb' only channel 0 (log mu) is touched; channel 1
+                # (log theta) was already set to 4.0 in __init__.
                 self.count_prediction_head[-1].weight.fill_(0.0)
+                if self.count_loss == 'ztnb':
+                    self.count_prediction_head[-1].bias[0].fill_(
+                        torch.log(avg_raw_count).item())
+                else:
+                    self.count_prediction_head[-1].bias.fill_(
+                        torch.log1p(avg_raw_count).item())
 
     def forward(
         self,
@@ -444,8 +499,9 @@ class GeneIntelligence(nn.Module):
                        ) and count_mask_positions is not None:
                 packed_count_mask = count_mask_positions.reshape(-1)[mask_flat]
                 count_masked_outputs = self.ln_f(x_packed[packed_count_mask])
-                count_preds = self.count_prediction_head(
-                    count_masked_outputs).squeeze(-1)
+                count_preds = self.count_prediction_head(count_masked_outputs)
+                if self.count_loss != 'ztnb':
+                    count_preds = count_preds.squeeze(-1)
 
             if hasattr(self, 'count_prediction_head'):
                 return logits, count_preds
@@ -463,7 +519,9 @@ class GeneIntelligence(nn.Module):
             logits = self.prediction_head(x)
 
             if hasattr(self, 'count_prediction_head'):
-                count_preds = self.count_prediction_head(x).squeeze(-1)
+                count_preds = self.count_prediction_head(x)
+                if self.count_loss != 'ztnb':
+                    count_preds = count_preds.squeeze(-1)
                 return logits, count_preds
 
             return logits
@@ -550,20 +608,59 @@ class GeneIntelligence(nn.Module):
                     # 5. Calculate final dynamic top-k accuracy
                     top_k_accuracy = (ranks <= k_per_token).float().mean()
 
-            # 2. Count Regression Loss (Raw)
+            # 2. Count Loss
             if predicting_counts and count_mask_positions is not None and count_preds is not None:
                 original_counts = batch['counts'].to(self.device,
                                                      non_blocking=True)
                 target_counts = original_counts[count_mask_positions].float()
 
-                # Apply log1p to compress dynamic range, matching the embeddings
-                target_counts_log = torch.log1p(
-                    torch.clamp(target_counts, min=0.0))
-                reg_loss = F.smooth_l1_loss(count_preds,
-                                            target_counts_log,
-                                            beta=1.0)
-                with torch.no_grad():
-                    reg_mae = F.l1_loss(count_preds, target_counts_log)
+                if self.count_loss == 'ztnb':
+                    nb_valid = (target_counts >= 1.0).float()
+                    n_valid = nb_valid.sum().clamp(min=1.0)
+
+                    # lgamma/expm1 are unstable in bf16; this runs under autocast.
+                    preds32 = count_preds.float()
+                    log_mu = preds32[:, 0].clamp(-10.0, 15.0)
+                    log_theta_min, log_theta_max = -2.5, 6.0  # effective range is soft -2.5 to 6, meaning theta 0.082 - 403
+                    span = log_theta_max - log_theta_min
+                    log_theta = log_theta_max - F.softplus(
+                        span - F.softplus(preds32[:, 1]))
+                    theta = log_theta.exp()
+
+                    # softplus form avoids the catastrophic cancellation in
+                    # log(theta + mu) - log(theta) when mu << theta.
+                    log_ratio = log_mu - log_theta
+                    log_p0 = -theta * F.softplus(log_ratio)  # log P(y = 0)
+                    log_mu_frac = -F.softplus(-log_ratio)  # log(mu/(theta+mu))
+
+                    log_nb = (torch.lgamma(target_counts + theta) -
+                              torch.lgamma(theta) -
+                              torch.lgamma(target_counts + 1.0) + log_p0 +
+                              target_counts * log_mu_frac)
+
+                    # log(1 - P0) via log1mexp; clamp guards the mu -> 0 limit.
+                    log_p0_c = log_p0.clamp(max=-1e-6)
+                    log_1m_p0 = torch.where(log_p0_c > -0.6931471805599453,
+                                            torch.log(-torch.expm1(log_p0_c)),
+                                            torch.log1p(-torch.exp(log_p0_c)))
+
+                    nll = -log_nb + log_1m_p0
+                    reg_loss = (nll * nb_valid).sum() / n_valid
+
+                    with torch.no_grad():
+                        # MAE against the truncated mean
+                        mu_trunc = log_mu.exp() * torch.exp(-log_1m_p0)
+                        reg_mae = ((mu_trunc - target_counts).abs() *
+                                   nb_valid).sum() / n_valid
+                else:
+                    # Apply log1p to compress dynamic range, matching the embeddings
+                    target_counts_log = torch.log1p(
+                        torch.clamp(target_counts, min=0.0))
+                    reg_loss = F.smooth_l1_loss(count_preds,
+                                                target_counts_log,
+                                                beta=1.0)
+                    with torch.no_grad():
+                        reg_mae = F.l1_loss(count_preds, target_counts_log)
 
             # 3. Dynamic Weighting
             if getattr(self.config, 'pretrain_dynamic_loss_weighting',

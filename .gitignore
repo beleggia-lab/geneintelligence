@@ -43,6 +43,7 @@ htmlcov/
 
 # Model checkpoints / weights
 *.pt
+!/models/**/*.pt
 *.pth
 *.ckpt
 *.safetensors

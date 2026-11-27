@@ -48,6 +48,9 @@ class GiConfig:
     pretrain_dynamic_loss_weighting: bool = False
     pretrain_count_uncertainty_floor: float | None = None
     pretrain_token_uncertainty_floor: float | None = None
+    pretrain_count_loss: str | None = None
+    pretrain_initialize_gene_biases: bool | None = None
+    pretrain_initialize_count_biases: bool | None = None
 
     # Pretraining data parameters
     pretrain_load_batch_size: int = 32

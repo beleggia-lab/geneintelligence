@@ -29,7 +29,7 @@ A cell's transcriptome is an unordered set of (gene, count) pairs. The `src/gene
 ### b. Transformer backbone
 
 The core model, defined in `src/geneintelligence/models.py`, is a pre-norm Transformer encoder with:
-* **FlashAttention** over variable-length packed (unpadded) sequences, via the `flash_attn` library's `flash_attn_varlen_func` kernel.
+* **Packed self-attention** uses FlashAttention on CUDA. On CPU, PyTorch scaled dot-product attention processes each cell separately, in tiles of up to 256 queries. Every query attends to the full cell.
 * **SwiGLU** feed-forward layers.
 * **Weight-tied** input and output embeddings.
 * **Configurable** hyperparameters, managed through the `GiConfig` dataclass in `src/geneintelligence/configs.py`.
@@ -53,6 +53,12 @@ The package source lives under `src/geneintelligence/`:
 * `api.py`: a high-level `GeneIntelligenceModel` interface for inference and for extracting cell-, gene-, and sample-level embeddings.
 * `embeddings.py`: utilities for pooling and concatenating embeddings into cell- and sample-level `AnnData` objects.
 
+### Pretrained model and metadata
+
+Each model has its own folder under `models/`. The eight-layer model in `models/1OJZl1/` pairs the pretrained weights from step 406816 with their YAML configuration.
+
+The shared `metadata/` folder contains the token dictionary (`token_dictionary.pickle`), the ordered gene panel (`gene_metadata_V1.h5`), and cell metadata for the source corpus (`cell_metadata_V1.h5`). When embedding new cells, the model reads their metadata from `cells.obs`.
+
 ---
 
 ## 4. Installation
@@ -60,15 +66,16 @@ The package source lives under `src/geneintelligence/`:
 ### a. Prerequisites
 
 * **Python 3.11+**
-* **CUDA-enabled GPU:** required to run the training and fine-tuning scripts. `flash-attn` is a hard dependency, so the package cannot be imported on a CPU-only system.
-* **PyTorch:** the project depends on `torch>=2.7`.
+* **PyTorch 2.7.1 or later**
+* The training and fine-tuning scripts require a CUDA-enabled GPU. Cell embedding supports CPU and CUDA.
 
 ### b. Installation steps
 
-1.  **Clone the repository**
+1.  **Clone the repository and fetch the model files**
+    Install the Git LFS command-line client. From the root of your clone, run the following to fetch the model weights and corpus cell metadata.
     ```bash
-    git clone https://github.com/beleggia-lab/geneintelligence.git
-    cd geneintelligence
+    git lfs install
+    git lfs pull
     ```
 
 2.  **(Recommended) Set up a virtual environment**
@@ -83,10 +90,10 @@ The package source lives under `src/geneintelligence/`:
         ```
 
 3.  **Install PyTorch**
-    Install the appropriate PyTorch version for your system and CUDA setup. See the [official PyTorch website](https://pytorch.org/get-started/locally/) for current instructions.
+    Install the CPU or CUDA build of PyTorch for your system. See the [official PyTorch website](https://pytorch.org/get-started/locally/) for current instructions.
 
-4.  **Install FlashAttention**
-    `flash-attn` builds against your already-installed PyTorch, so it must be installed *after* PyTorch and with build isolation disabled. Installing it explicitly here means the final step will not try to rebuild it.
+4.  **For CUDA, install FlashAttention**
+    CPU users can continue to step 5. The CUDA kernel builds against the installed PyTorch with build isolation disabled.
     ```bash
     pip install packaging ninja
     pip install flash-attn --no-build-isolation
@@ -99,12 +106,40 @@ The package source lives under `src/geneintelligence/`:
     pip install .
     ```
 
+### c. Embed cells on CPU or GPU
+
+Run this example from the repository root to load the eight-layer model and its shared metadata. The example expects a prepared `cells.h5ad` with raw counts in `.X` as an `int32` sparse CSR matrix. Its gene IDs must match the model’s gene panel in the same order. Reading the gene metadata with pandas requires PyTables (`pip install tables`).
+
+```python
+import anndata as ad
+import pandas as pd
+
+from geneintelligence import GeneIntelligenceModel
+
+cells = ad.read_h5ad("cells.h5ad")
+gene_metadata = pd.read_hdf("metadata/gene_metadata_V1.h5", key="gene_metadata")
+assert cells.var_names.equals(gene_metadata.index)
+
+model = GeneIntelligenceModel(
+    checkpoint_path="models/1OJZl1/1OJZl1_406816.pt",
+    config_path="models/1OJZl1/1OJZl1_config.yaml",
+    token_dictionary=pd.read_pickle("metadata/token_dictionary.pickle"),
+    gene_metadata=gene_metadata,
+    device="cpu",  # Use "cuda" to run on a GPU.
+)
+
+embeddings = model.embed_cells(cells, batch_size=2)
+embeddings.write_h5ad("cell_embeddings.h5ad")
+```
+
+The output contains one embedding per cell in `embeddings.X` and retains the input cell metadata in `embeddings.obs`. To select the device automatically, omit `device`. Gene Intelligence uses CUDA when available and CPU otherwise.
+
 ---
 
 ## 5. Roadmap
 
 Planned work includes:
-* Release of pre-trained checkpoints and configuration files.
+* Release additional pretrained models.
 * A packaged doublet-detection workflow (the `detect_doublets` API is currently under development).
 * Continued refinement of the high-level API.
 

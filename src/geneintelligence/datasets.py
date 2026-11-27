@@ -17,6 +17,7 @@ import os
 import random
 import tempfile
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 # Third-Party Imports
@@ -353,7 +354,7 @@ class AnnDataDataset(Dataset):
         if self.return_counts:
             final_counts = np.concatenate((self.prefix_counts, sorted_counts),
                                           dtype=self._count_dtype,
-                                          casting='no')
+                                          casting='safe')
             final_counts = final_counts[:self.max_len]
             return token_ids, final_counts
 
@@ -567,7 +568,7 @@ class LmdbDataset(Dataset):
         if self.return_counts:
             final_counts = np.concatenate((self.prefix_counts, sorted_counts),
                                           dtype=self._count_dtype,
-                                          casting='no')
+                                          casting='safe')
             final_counts = final_counts[:self.max_len]
             return token_ids, final_counts
 
@@ -1006,3 +1007,103 @@ def gi_collate(batch: list[Any],
         result["masked_counts"] = torch.empty(0, dtype=torch.int32)
 
     return result
+
+
+def lmdb_to_h5ad(
+    database_path: str | Path,
+    obs: pd.DataFrame,
+    var: pd.DataFrame,
+    output_path: str | Path,
+    dtype: np.dtype | type = np.uint16,
+    compression: str | None = "lzf",
+) -> None:
+    """Materialize cells from an LMDB store and write them to an .h5ad.
+
+    Each LMDB value is an lz4-compressed buffer decoding to a
+    ``(2, n_expressed)`` uint16 array: row 0 holds gene indices (positions
+    into `var`), row 1 holds counts. Keys are the cell IDs, UTF-8 encoded.
+
+    Cells are read and written in LMDB key order (bytewise sort of
+    `obs.index`), so lookups walk the B+tree roughly front-to-back. The
+    resulting `.obs` is sorted the same way, not in the order passed in.
+
+    The .h5ad is written to a sibling temporary file, flushed to disk, and
+    renamed into place, so `output_path` never exists in a partial state.
+
+    Args:
+        database_path: Path to the LMDB directory.
+        obs: Cell metadata. Its index supplies the LMDB keys, so subset it
+            to select cells.
+        var: Gene metadata; its length defines the number of columns.
+        output_path: Destination .h5ad path.
+        dtype: Integer dtype for both ``X.data`` and ``X.indices``. Counts
+            are clipped to its range; must be wide enough to index `var`.
+        compression: h5ad compression, one of 'gzip', 'lzf', or None.
+    """
+    output_path = Path(output_path)
+
+    # Bytewise sort, matching LMDB's key comparison.
+    obs = obs.iloc[np.argsort(obs.index.to_numpy(dtype="S"), kind="stable")]
+
+    n_cells = len(obs)
+    n_genes = var.shape[0]
+
+    indptr = np.zeros(n_cells + 1, dtype=np.int64)
+    index_chunks: list[np.ndarray] = []
+    data_chunks: list[np.ndarray] = []
+
+    env = lmdb.open(str(database_path),
+                    readonly=True,
+                    lock=False,
+                    readahead=True,
+                    max_readers=512,
+                    subdir=True)
+    try:
+        with env.begin(write=False) as txn:
+            for i, cell_id in enumerate(obs.index):
+                record = np.frombuffer(
+                    lz4.frame.decompress(txn.get(
+                        str(cell_id).encode("utf-8"))),
+                    dtype=np.uint16,
+                ).reshape(2, -1)
+
+                index_chunks.append(record[0])
+                data_chunks.append(record[1])
+                indptr[i + 1] = indptr[i] + record.shape[1]
+    finally:
+        env.close()
+
+    indices = np.concatenate(index_chunks)
+    data = np.concatenate(data_chunks)
+
+    info = np.iinfo(dtype)
+
+    if indices.max() >= n_genes:
+        raise ValueError(f"Gene index {int(indices.max())} exceeds the "
+                         f"{n_genes} rows in var.")
+    if n_genes > info.max:
+        raise ValueError(f"dtype {np.dtype(dtype)} cannot index {n_genes} "
+                         f"genes (max {info.max}).")
+
+    data = np.clip(data, info.min, info.max).astype(dtype, copy=False)
+
+    X = csr_matrix((data, indices, indptr),
+                   shape=(n_cells, n_genes),
+                   dtype=dtype)
+    X.sort_indices()
+    X.indices = X.indices.astype(dtype, copy=False)
+
+    adata = AnnData(X=X, obs=obs.copy(), var=var.copy())
+
+    temp_path = output_path.with_name(output_path.name + ".tmp")
+    adata.write_h5ad(temp_path, compression=compression)
+
+    with open(temp_path, "rb+") as f:
+        os.fsync(f.fileno())
+    os.replace(temp_path, output_path)
+
+    dir_fd = os.open(output_path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
